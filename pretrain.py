@@ -55,6 +55,9 @@ from transformers import AutoTokenizer
 from datetime import datetime
 import traceback
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # pas de display — sauvegarde fichier direct (compatible SSH/tmux)
+import matplotlib.pyplot as plt
 
 sys.path.append('./Core/Model')
 
@@ -289,6 +292,108 @@ class WSDScheduler:
 
     def load_state_dict(self, sd):
         self.current_step = sd['current_step']
+
+# ============================================================
+# GRAPHES — Loss & PPL curves
+# ============================================================
+def plot_loss_curve(training_history, save_path=None):
+    """
+    Graph loss train (raw + smooth 200 steps) + val loss par optimizer step.
+    Sauvegardé en PNG, mis à jour à chaque validation et en fin de training.
+    """
+    steps      = [e['step']       for e in training_history.get('loss_curve', [])]
+    train_loss = [e['train_loss'] for e in training_history.get('loss_curve', [])]
+    val_steps  = [e['step']       for e in training_history.get('validations', [])]
+    val_loss   = [e['val_loss']   for e in training_history.get('validations', [])]
+
+    if not steps:
+        return
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+
+    # Courbe brute
+    ax.plot(steps, train_loss, color='steelblue', linewidth=0.8,
+            alpha=0.4, label='Train loss (raw)')
+
+    # Moyenne glissante 200 steps
+    # np.convolve mode='valid' → len = N - K + 1, aligné sur steps[K-1:]
+    if len(train_loss) >= 200:
+        K        = 200
+        kernel   = np.ones(K) / K
+        smoothed = np.convolve(train_loss, kernel, mode='valid')  # len = N - K + 1
+        ax.plot(steps[K - 1:], smoothed,
+                color='steelblue', linewidth=2.0, label='Train loss (smooth ×200)')
+
+    # Val loss
+    if val_steps:
+        ax.plot(val_steps, val_loss, color='tomato', linewidth=2.0,
+                marker='o', markersize=4, label='Val loss')
+
+    ax.set_xlabel('Optimizer step')
+    ax.set_ylabel('Loss')
+    ax.set_title('HessGPT Pretrain — Loss Curve')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if save_path is None:
+        save_path = CONFIG['checkpoint_file'].replace('.pt', '_loss.png')
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"  📈 Loss curve → {save_path}")
+
+
+def plot_ppl_curve(training_history, save_path=None):
+    """
+    Graph perplexité train (smooth 200 steps) + val ppl par optimizer step.
+    PPL = exp(loss), clippée à 1000 pour éviter les pics NaN en début de training.
+    """
+    steps      = [e['step']       for e in training_history.get('loss_curve', [])]
+    train_loss = [e['train_loss'] for e in training_history.get('loss_curve', [])]
+    val_steps  = [e['step']       for e in training_history.get('validations', [])]
+    val_ppl    = [e['val_ppl']    for e in training_history.get('validations', [])]
+
+    if not steps:
+        return
+
+    # PPL train — seulement la version smooth pour lisibilité
+    train_ppl = [math.exp(min(l, 6.9)) for l in train_loss]  # clip à ~1000 PPL max
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+
+    if len(train_ppl) >= 200:
+        K        = 200
+        kernel   = np.ones(K) / K
+        smoothed = np.convolve(train_ppl, kernel, mode='valid')  # len = N - K + 1
+        ax.plot(steps[K - 1:], smoothed,
+                color='mediumseagreen', linewidth=2.0, label='Train PPL (smooth ×200)')
+    else:
+        ax.plot(steps, train_ppl, color='mediumseagreen', linewidth=1.5,
+                label='Train PPL (raw)')
+
+    if val_steps:
+        ax.plot(val_steps, val_ppl, color='darkorange', linewidth=2.0,
+                marker='o', markersize=4, label='Val PPL')
+
+    ax.set_xlabel('Optimizer step')
+    ax.set_ylabel('Perplexity')
+    ax.set_title('HessGPT Pretrain — Perplexity Curve')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if save_path is None:
+        save_path = CONFIG['checkpoint_file'].replace('.pt', '_ppl.png')
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"  📊 PPL curve  → {save_path}")
+
+
+def save_graphs(training_history):
+    """Sauvegarde les deux graphes en une seule appel."""
+    plot_loss_curve(training_history)
+    plot_ppl_curve(training_history)
+
 
 # ============================================================
 # DATASET — 1 chunk à la fois en RAM
@@ -747,6 +852,7 @@ def train_one_chunk(
                         'train_loss':         avg,
                         'lr':                 scheduler.get_last_lr()[0],
                     })
+                    save_graphs(training_history)
 
                 if global_step % CONFIG['save_every_steps'] == 0:
                     checkpoint_manager.save(model, optimizers, scheduler, metadata={
@@ -762,6 +868,15 @@ def train_one_chunk(
             running_loss    += raw
             valid_batches   += 1
             running_batches += 1
+
+            # ── Loss curve logging (1 point par optimizer step) ──
+            # On log uniquement quand un optimizer step vient d'avoir lieu
+            # accumulated_steps == 0 signifie qu'on vient de faire step()
+            if accumulated_steps == 0 and global_step > 0:
+                training_history.setdefault('loss_curve', []).append({
+                    'step':       global_step,
+                    'train_loss': raw,
+                })
 
             if batch_idx % 20 == 0:
                 avg = running_loss / max(running_batches, 1)
@@ -1029,6 +1144,7 @@ def main():
     with open(history_path, 'w') as f:
         json.dump(training_history, f, indent=2, default=str)
     print(f'  History : {history_path}')
+    save_graphs(training_history)
     print('DONE')
 
 
