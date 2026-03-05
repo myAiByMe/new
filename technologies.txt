@@ -1,0 +1,133 @@
+====================================================
+  HessGPT v7 - Technologies & Architecture
+====================================================
+
+--- ATTENTION ---
+- Multi-Head Attention (MHA)
+- Grouped Query Attention (GQA) — repeat_interleave (n_heads=20, n_kv_heads=5, ratio 4:1)
+- Flash Attention (F.scaled_dot_product_attention, PyTorch 2.0+)
+- QK-Norm (RMSNorm sur Q et K après reshape, avant RoPE)
+- Causal Masking (masque triangulaire pré-alloué, compile-safe)
+- KV Cache (prefill + decode autorégressif, stocke K/V non-répétés)
+
+--- POSITIONAL ENCODING ---
+- RoPE (Rotary Positional Embedding) avec cache cos/sin
+- YaRN (Yet another RoPE extensioN) — extension de contexte x2 (1024→2048 en SFT)
+- position_offset en decode pour alignement correct avec KV cache
+- Fallback : Learned Positional Embeddings (si RoPE désactivé)
+
+--- NORMALISATION ---
+- RMSNorm (Root Mean Square Normalization) — Pre-Norm
+
+--- FEED-FORWARD ---
+- SwiGLU (Swish-Gated Linear Unit) — hidden_dim = ⌈8/3 × embed_dim⌉ arrondi à 64
+- Fallback : GELU FFN classique
+
+--- ACTIVATION FUNCTIONS ---
+- SiLU / Swish (dans SwiGLU)
+- GELU (fallback FFN)
+- Tanh (soft-capping logits, Gemma-style, cap=30.0)
+
+--- ARCHITECTURE GENERALE ---
+- Transformer Decoder-only (GPT-style)
+- Pre-LayerNorm (RMSNorm avant attention et FFN)
+- Residual Connections
+- Weight Tying (token embeddings partagés avec output head)
+- Soft-Capping logits (Gemma-style, tanh, cap=30.0)
+- 24 couches × embed_dim=1280 × 20 heads → ~581M paramètres
+
+--- GENERATION ---
+- Autoregressive decoding avec KV Cache (prefill + decode)
+- Temperature scaling
+- Top-K sampling
+- Top-P sampling (Nucleus Sampling)
+- Greedy decoding (temperature=0.0)
+- EOS token stop
+
+--- OPTIMISATIONS ARCHITECTURE ---
+- Causal mask pré-alloué (register_buffer, compile-safe)
+- RoPE cos/sin cache (invalidé si device/dtype change)
+- KV cache non-répété (stocke n_kv_heads, repeat après concat)
+- Weight tying (réduit VRAM : 164M au lieu de 328M pour embeddings+head)
+- Bias=False sur toutes les projections linéaires
+
+--- PRÉ-ENTRAÎNEMENT ---
+- Sliding window chunks (jamais de recyclage, chunk vu une seule fois)
+- LazyChunkDataset (1 chunk en RAM à la fois, ~10GB)
+- Gradient Accumulation (×4)
+- Mixed Precision (bfloat16 sur CUDA)
+- torch.compile (mode default)
+- NaN/Inf guards (skip batch + zero_grad)
+- OOM recovery (empty_cache + zero_grad + continue)
+- Validation périodique (@torch.no_grad, finally: model.train())
+- Checkpoint atomique (os.replace sur .tmp)
+- CONFIG : embed=1280, layers=24, heads=20, kv_heads=5, seq_len=1024
+
+--- OPTIMISEURS ---
+- Muon (MomentUm Orthogonalized by Newton-Schulz)
+    · Newton-Schulz 5 itérations, normalisation G.norm()+1e-7
+    · Appliqué sur matrices 2D des TransformerBlocks uniquement
+    · Exclus : token_embeddings, output_head (weight-tied), position_embeddings
+    · lr_muon = lr_adamw × 5.0
+    · Momentum Nesterov 0.95
+- AdamW (embeddings, RMSNorm, biases, inv_freq)
+    · fused=True sur CUDA
+    · weight_decay=0.1 (decay) / 0.0 (no-decay)
+    · betas=(0.9, 0.95), eps=1e-8
+- Backward compatibility checkpoint (ancien format optimizer_state_dict)
+
+--- LR SCHEDULE ---
+- WSD (Warmup / Stable / Decay) cosinus
+    · warmup_ratio=0.03, decay_ratio=0.15, min_lr_ratio=0.1
+    · Ratio Muon/AdamW maintenu à ×5 à chaque step
+    · get_lr() appelé AVANT current_step += 1
+
+--- SFT (Supervised Fine-Tuning) ---
+- 2-Stage Training avec LoRA
+- Stage 1 — Cold Start : Bespoke-Stratos-17k, 1 epoch, LR=1e-4
+- Stage 2 — Full Mix   : ~300k samples, 3 epochs, LR=5e-5
+- Format chat LLaMA-3 natif (<|start_header_id|> / <|end_header_id|> / <|eot_id|>)
+- Assistant-only loss masking (machine à états multi-turn, <|eot_id|> inclus)
+- Skip batch entièrement masqué ((y != -100).sum() == 0)
+- CONFIG SFT : layers=24, max_seq_len=2048, YaRN x2.0
+
+--- LORA ---
+- Rank 64, Alpha 128, Dropout 0.05
+- Cibles : q_proj, k_proj, v_proj, out_proj, gate_proj, up_proj, down_proj
+- lora_B initialisé à zéro (pas de perturbation initiale)
+- Seuls les poids LoRA sauvegardés dans le checkpoint SFT
+- Muon ciblé sur lora_A et lora_B (matrices 2D)
+
+--- DATASETS SFT ---
+Stage 1 :
+  - Bespoke-Stratos-17k         (cold start <think> circuit)
+
+Stage 2 (~300k samples) :
+  - PiKa-SFT                76k  (~27%)  GPT-4o expert
+  - OpenThoughts3 Logic      96k  (~34%)  Science/Logic + HES Top20%
+  - Smol-Magpie-Ultra        90k  (~32%)  Llama-405B, filtre no-code
+  - Aegis-AI Safety          14k  ( ~5%)  refus propres / safety
+  - RefGPT-Fact              10k  ( ~4%)  factuel Wikipedia, annealing=True
+  - LongAlign-10k            14k  ( ~5%)  long-context YaRN (conditionnel)
+
+--- DATA ANNEALING (SFT Stage 2) ---
+- Détecté par : scheduler.current_step >= warmup_steps + stable_steps
+- Epochs en phase decay → WeightedRandomSampler (anneal_factor=5.0)
+- RefGPT-Fact surpondéré ×5 → cristallise la factualité avant fin du training
+- Loader sélectionné avant chaque epoch (epoch_loader = anneal_loader if in_decay)
+
+--- FILTRES QUALITÉ ---
+- HES (High-Entropy Sum) : garde Top 20% samples OpenThoughts3 (densité logique)
+- No-Code filter : exclut blocs ```python/js/... et <code> longs (Magpie)
+- Catégories OpenThoughts3 : science, puzzles, logic, reasoning, philosophy
+
+--- TOKENIZER ---
+- LLaMA-3 8B (unsloth/Meta-Llama-3-8B) — vocab 128k
+- Tokens custom ajoutés : <think>, </think>, <code>
+
+--- FRAMEWORK ---
+- PyTorch (nn.Module, F.scaled_dot_product_attention)
+- HuggingFace Transformers (tokenizer) + Datasets (loaders)
+- Python 3.x
+
+====================================================

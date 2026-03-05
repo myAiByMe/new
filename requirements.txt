@@ -1,0 +1,204 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# HessGPT DUAL MODEL - REQUIREMENTS
+# Python 3.10+ required
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CORE DEEP LEARNING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PyTorch (2.0+ for Flash Attention)
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+
+# For CUDA 11.8 (H100/RTX GPUs):
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# For CUDA 12.1 (newer GPUs):
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# For CPU only:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TRANSFORMERS & TOKENIZERS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Hugging Face Transformers (for tokenizers and models)
+transformers>=4.36.0
+
+# Tokenizers (fast C++ implementation)
+tokenizers>=0.15.0
+
+# Sentencepiece (for Mistral tokenizer)
+sentencepiece>=0.1.99
+
+# Datasets (for loading HuggingFace datasets)
+datasets>=2.16.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DATA PROCESSING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# NumPy (for fast data loading with .npy files)
+numpy>=1.24.0
+
+# Pandas (for data manipulation)
+pandas>=2.0.0
+
+# PyArrow (for efficient data serialization)
+pyarrow>=14.0.0
+
+# Zstandard (for DCLM dataset compression)
+zstandard>=0.21.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TRAINING UTILITIES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Accelerate (for distributed training)
+accelerate>=0.25.0
+
+# PEFT (Parameter-Efficient Fine-Tuning for LoRA)
+peft>=0.7.0
+
+# BitsAndBytes (for 8-bit/4-bit quantization)
+bitsandbytes>=0.41.0
+
+# DeepSpeed (optional, for multi-GPU training)
+# deepspeed>=0.12.0
+
+# Wandb (for experiment tracking - optional)
+# wandb>=0.16.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PROGRESS & MONITORING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# TQDM (progress bars)
+tqdm>=4.66.0
+
+# PSUtil (for system monitoring)
+psutil>=5.9.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PYTHON SANDBOX (for Model 2 code execution)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# RestrictedPython (secure Python execution)
+RestrictedPython>=6.0
+
+# Alternative: PyPy (faster, more secure)
+# Download from: https://www.pypy.org/download.html
+
+# SymPy (for mathematical computations in sandbox)
+sympy>=1.12
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# UTILITIES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Requests (for downloading datasets)
+requests>=2.31.0
+
+# Beautiful Soup (for HTML parsing if needed)
+beautifulsoup4>=4.12.0
+
+# Regex (for text filtering)
+regex>=2023.10.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# INFERENCE OPTIMIZATION (optional but recommended)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Flash Attention 2 (if available for your GPU)
+# flash-attn>=2.3.0
+# Installation: pip install flash-attn --no-build-isolation
+
+# xFormers (alternative to Flash Attention)
+# xformers>=0.0.22
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DEVELOPMENT TOOLS (optional)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Jupyter (for experiments and debugging)
+# jupyter>=1.0.0
+# ipykernel>=6.27.0
+
+# Black (code formatter)
+# black>=23.11.0
+
+# Pylint (code linter)
+# pylint>=3.0.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# INSTALLATION INSTRUCTIONS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# STEP 1: Create virtual environment (recommended)
+# python -m venv hessgpt_env
+# source hessgpt_env/bin/activate  # Linux/Mac
+# hessgpt_env\Scripts\activate     # Windows
+
+# STEP 2: Install PyTorch with CUDA support (H100/RTX)
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# STEP 3: Install all other requirements
+# pip install -r requirements.txt
+
+# STEP 4: Verify installation
+# python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}')"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SYSTEM REQUIREMENTS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Python: 3.10 or 3.11 (3.12 not fully supported by all packages)
+# CUDA: 11.8 or 12.1 (for GPU acceleration)
+# RAM: 64-256 GB (for data loading)
+# VRAM: 80 GB (H100) or 16+ GB (RTX GPUs with smaller batch size)
+# Storage: 500+ GB SSD (for datasets and checkpoints)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TROUBLESHOOTING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Issue: "CUDA out of memory"
+# Solution: Reduce batch_size in config
+
+# Issue: "No module named 'flash_attn'"
+# Solution: Flash Attention is optional, model will use fallback
+
+# Issue: "Slow data loading"
+# Solution: Increase num_workers in DataLoader (4-8 recommended)
+
+# Issue: "ImportError: libcudnn.so"
+# Solution: Install CUDA toolkit matching your PyTorch version
+
+# Issue: "Tokenizer not found"
+# Solution: Run: huggingface-cli login (if using gated models)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# NOTES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# - All versions are minimum requirements
+# - Use latest stable versions when possible
+# - Flash Attention 2 requires compatible GPU (Ampere or newer)
+# - BitsAndBytes requires CUDA (not available for CPU-only)
+# - RestrictedPython provides basic sandbox security
+# - For production, consider Docker containers for sandbox isolation
