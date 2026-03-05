@@ -86,6 +86,9 @@ tqdm>=4.66.0
 # PSUtil (for system monitoring)
 psutil>=5.9.0
 
+# Matplotlib (for loss/PPL curve graphs)
+matplotlib>=3.7.0
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PYTHON SANDBOX (for Model 2 code execution)
