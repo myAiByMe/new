@@ -983,7 +983,7 @@ def main():
     muon_opt, adamw_opt = optimizers
 
     scheduler = WSDScheduler(
-        optimizers,
+        list(optimizers),
         max_lr        = CONFIG['learning_rate'],
         total_steps   = TOTAL_STEPS,
         warmup_ratio  = CONFIG['warmup_ratio'],
