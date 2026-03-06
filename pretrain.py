@@ -59,7 +59,14 @@ import matplotlib
 matplotlib.use('Agg')  # pas de display — sauvegarde fichier direct (compatible SSH/tmux)
 import matplotlib.pyplot as plt
 
-sys.path.append('./Core/Model')
+from huggingface_hub import login
+login(token="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")
+
+_core = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Core')
+sys.path.append(os.path.join(_core, 'Model'))
+sys.path.append(os.path.join(_core, 'Attention'))
+sys.path.append(os.path.join(_core, 'FeedForward'))
+sys.path.append(os.path.join(_core, 'TransformerBlock'))
 
 # ============================================================
 # TOKENS SPÉCIAUX
