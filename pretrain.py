@@ -99,7 +99,7 @@ CONFIG = {
     'use_flash_attn':        True,
 
     # ── Training
-    'batch_size':            32,
+    'batch_size':            26,
     'gradient_accumulation': 4,
     'max_grad_norm':         1.0,
     'learning_rate':         4e-4,
@@ -134,7 +134,7 @@ CONFIG = {
     # ── System
     'use_compile':  True,
     'compile_mode': 'default',
-    'num_workers':  4,
+    'num_workers':  16,
 }
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
