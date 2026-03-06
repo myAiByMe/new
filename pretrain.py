@@ -786,17 +786,18 @@ def train_one_chunk(
         cds.get_train_dataset(),
         batch_size=CONFIG['batch_size'],
         shuffle=False,
-        num_workers=CONFIG['num_workers'],
+        num_workers=CONFIG['num_workers'],  # 16
         pin_memory=True,
-        persistent_workers=False,
+        persistent_workers=True,   # ← change False→True, évite de re-spawner les workers à chaque chunk
         drop_last=False,
     )
     val_loader = DataLoader(
         cds.get_val_dataset(),
         batch_size=CONFIG['batch_size'],
         shuffle=False,
-        num_workers=2,
+        num_workers=CONFIG['num_workers'],  # 16 au lieu de 2
         pin_memory=True,
+        persistent_workers=True,   # ← idem
     )
 
     num_batches = len(train_loader)
