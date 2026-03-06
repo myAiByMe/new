@@ -129,7 +129,7 @@ CONFIG = {
     'save_every_steps': 2000,
 
     # ── Checkpoint
-    'checkpoint_file': './checkpoints/HessGpt_pretrain.pt',
+    'checkpoint_file': './Model/HessGpt_pretrain.pt',
 
     # ── System
     'use_compile':  True,
