@@ -99,7 +99,7 @@ CONFIG = {
     'use_flash_attn':        True,
 
     # ── Training
-    'batch_size':            26,
+    'batch_size':            24,
     'gradient_accumulation': 4,
     'max_grad_norm':         1.0,
     'learning_rate':         4e-4,
