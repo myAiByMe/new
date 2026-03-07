@@ -354,12 +354,8 @@ class SeededSampler(torch.utils.data.Sampler):
     def __len__(self):
         return len(self._indices)
 
-
 class LazyChunkDataset:
-    """
-    Charge 1 chunk en RAM, split train/val.
-    Appeler unload() après le train pour libérer la RAM.
-    """
+    """Charge 1 chunk en RAM, split train/val. Appeler unload() après le train."""
     def __init__(self, chunk_info, seq_len, pad_token_id, val_tokens=15_000_000):
         self.seq_len      = seq_len
         self.pad_token_id = pad_token_id
@@ -385,6 +381,15 @@ class LazyChunkDataset:
 
         all_tokens = torch.cat(arrays)
         total      = len(all_tokens)
+
+        # shuffle les séquences complètes avant le split train/val
+        seq_len_1  = self.seq_len + 1
+        n_seqs     = total // seq_len_1
+        rng        = np.random.default_rng(42)
+        idx        = rng.permutation(n_seqs)
+        all_tokens = all_tokens[:n_seqs * seq_len_1].reshape(n_seqs, seq_len_1)[idx].reshape(-1)
+        total      = len(all_tokens)
+
         val_size   = min(self.val_tokens, int(total * 0.05))
         train_size = total - val_size
 
@@ -408,7 +413,7 @@ class LazyChunkDataset:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print(f"  RAM chunk libérée")
-
+        
 # ============================================================
 # CHECKPOINT MANAGER
 # ============================================================
@@ -690,7 +695,7 @@ def train_one_chunk(
         num_workers = CONFIG['num_workers'],
         pin_memory  = True,
         persistent_workers = False,
-        drop_last   = False,
+        drop_last   = True,
     )
     val_loader = DataLoader(
         cds.get_val_dataset(),
@@ -701,7 +706,7 @@ def train_one_chunk(
     )
 
     num_batches = len(train_loader)   # = batches restants après skip
-    total_batches = math.ceil(total_seqs / CONFIG['batch_size'])
+    total_batches = total_seqs // CONFIG['batch_size']
     print(f"  train={total_batches:,} batches total | restant={num_batches:,} | val={len(val_loader):,}")
 
     model.train()
