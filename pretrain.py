@@ -55,18 +55,8 @@ from transformers import AutoTokenizer
 from datetime import datetime
 import traceback
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # pas de display — sauvegarde fichier direct (compatible SSH/tmux)
-import matplotlib.pyplot as plt
 
-from huggingface_hub import login
-login(token="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")
-
-_core = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Core')
-sys.path.append(os.path.join(_core, 'Model'))
-sys.path.append(os.path.join(_core, 'Attention'))
-sys.path.append(os.path.join(_core, 'FeedForward'))
-sys.path.append(os.path.join(_core, 'TransformerBlock'))
+sys.path.append('./Core/Model')
 
 # ============================================================
 # TOKENS SPÉCIAUX
@@ -99,7 +89,7 @@ CONFIG = {
     'use_flash_attn':        True,
 
     # ── Training
-    'batch_size':            24,
+    'batch_size':            32,
     'gradient_accumulation': 4,
     'max_grad_norm':         1.0,
     'learning_rate':         4e-4,
@@ -129,12 +119,12 @@ CONFIG = {
     'save_every_steps': 2000,
 
     # ── Checkpoint
-    'checkpoint_file': './Model/HessGpt_pretrain.pt',
+    'checkpoint_file': './checkpoints/HessGpt_pretrain.pt',
 
     # ── System
     'use_compile':  True,
     'compile_mode': 'default',
-    'num_workers':  16,
+    'num_workers':  4,
 }
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -230,7 +220,7 @@ print(f"  safety save : tous les {CONFIG['save_every_steps']} steps")
 # TOKENIZER
 # ============================================================
 print(f"\nLoading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained("NousResearch/Meta-Llama-3-8B")
+tokenizer = AutoTokenizer.from_pretrained("unsloth/Meta-Llama-3-8B")
 tokenizer.add_special_tokens({'additional_special_tokens': SPECIAL_TOKENS})
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
@@ -299,108 +289,6 @@ class WSDScheduler:
 
     def load_state_dict(self, sd):
         self.current_step = sd['current_step']
-
-# ============================================================
-# GRAPHES — Loss & PPL curves
-# ============================================================
-def plot_loss_curve(training_history, save_path=None):
-    """
-    Graph loss train (raw + smooth 200 steps) + val loss par optimizer step.
-    Sauvegardé en PNG, mis à jour à chaque validation et en fin de training.
-    """
-    steps      = [e['step']       for e in training_history.get('loss_curve', [])]
-    train_loss = [e['train_loss'] for e in training_history.get('loss_curve', [])]
-    val_steps  = [e['step']       for e in training_history.get('validations', [])]
-    val_loss   = [e['val_loss']   for e in training_history.get('validations', [])]
-
-    if not steps:
-        return
-
-    fig, ax = plt.subplots(figsize=(14, 5))
-
-    # Courbe brute
-    ax.plot(steps, train_loss, color='steelblue', linewidth=0.8,
-            alpha=0.4, label='Train loss (raw)')
-
-    # Moyenne glissante 200 steps
-    # np.convolve mode='valid' → len = N - K + 1, aligné sur steps[K-1:]
-    if len(train_loss) >= 200:
-        K        = 200
-        kernel   = np.ones(K) / K
-        smoothed = np.convolve(train_loss, kernel, mode='valid')  # len = N - K + 1
-        ax.plot(steps[K - 1:], smoothed,
-                color='steelblue', linewidth=2.0, label='Train loss (smooth ×200)')
-
-    # Val loss
-    if val_steps:
-        ax.plot(val_steps, val_loss, color='tomato', linewidth=2.0,
-                marker='o', markersize=4, label='Val loss')
-
-    ax.set_xlabel('Optimizer step')
-    ax.set_ylabel('Loss')
-    ax.set_title('HessGPT Pretrain — Loss Curve')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-
-    if save_path is None:
-        save_path = CONFIG['checkpoint_file'].replace('.pt', '_loss.png')
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    print(f"  📈 Loss curve → {save_path}")
-
-
-def plot_ppl_curve(training_history, save_path=None):
-    """
-    Graph perplexité train (smooth 200 steps) + val ppl par optimizer step.
-    PPL = exp(loss), clippée à 1000 pour éviter les pics NaN en début de training.
-    """
-    steps      = [e['step']       for e in training_history.get('loss_curve', [])]
-    train_loss = [e['train_loss'] for e in training_history.get('loss_curve', [])]
-    val_steps  = [e['step']       for e in training_history.get('validations', [])]
-    val_ppl    = [e['val_ppl']    for e in training_history.get('validations', [])]
-
-    if not steps:
-        return
-
-    # PPL train — seulement la version smooth pour lisibilité
-    train_ppl = [math.exp(min(l, 6.9)) for l in train_loss]  # clip à ~1000 PPL max
-
-    fig, ax = plt.subplots(figsize=(14, 5))
-
-    if len(train_ppl) >= 200:
-        K        = 200
-        kernel   = np.ones(K) / K
-        smoothed = np.convolve(train_ppl, kernel, mode='valid')  # len = N - K + 1
-        ax.plot(steps[K - 1:], smoothed,
-                color='mediumseagreen', linewidth=2.0, label='Train PPL (smooth ×200)')
-    else:
-        ax.plot(steps, train_ppl, color='mediumseagreen', linewidth=1.5,
-                label='Train PPL (raw)')
-
-    if val_steps:
-        ax.plot(val_steps, val_ppl, color='darkorange', linewidth=2.0,
-                marker='o', markersize=4, label='Val PPL')
-
-    ax.set_xlabel('Optimizer step')
-    ax.set_ylabel('Perplexity')
-    ax.set_title('HessGPT Pretrain — Perplexity Curve')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-
-    if save_path is None:
-        save_path = CONFIG['checkpoint_file'].replace('.pt', '_ppl.png')
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    print(f"  📊 PPL curve  → {save_path}")
-
-
-def save_graphs(training_history):
-    """Sauvegarde les deux graphes en une seule appel."""
-    plot_loss_curve(training_history)
-    plot_ppl_curve(training_history)
-
 
 # ============================================================
 # DATASET — 1 chunk à la fois en RAM
@@ -758,9 +646,11 @@ def train_one_chunk(
     checkpoint_manager, training_history,
     global_step, total_training_time,
     current_epoch, chunk_within_epoch,
+    resume_step=0,
 ):
     """
-    optimizers : tuple (muon_opt, adamw_opt)
+    optimizers  : tuple (muon_opt, adamw_opt)
+    resume_step : global_step au début de ce chunk — skip les batches déjà faits
     """
     muon_opt, adamw_opt = optimizers
 
@@ -786,22 +676,27 @@ def train_one_chunk(
         cds.get_train_dataset(),
         batch_size=CONFIG['batch_size'],
         shuffle=False,
-        num_workers=CONFIG['num_workers'],  # 16
+        num_workers=CONFIG['num_workers'],
         pin_memory=True,
-        persistent_workers=True,   # ← change False→True, évite de re-spawner les workers à chaque chunk
+        persistent_workers=False,
         drop_last=False,
     )
     val_loader = DataLoader(
         cds.get_val_dataset(),
         batch_size=CONFIG['batch_size'],
         shuffle=False,
-        num_workers=CONFIG['num_workers'],  # 16 au lieu de 2
+        num_workers=2,
         pin_memory=True,
-        persistent_workers=True,   # ← idem
     )
 
     num_batches = len(train_loader)
     print(f"  train={num_batches:,} batches | val={len(val_loader):,} batches")
+
+    # Calcul des batches déjà faits pour ce chunk (reprise)
+    steps_done   = global_step - resume_step
+    batches_done = steps_done * CONFIG['gradient_accumulation']
+    if batches_done > 0:
+        print(f"  ⏩ Reprise : skip {batches_done:,} batches déjà faits ({steps_done:,} optimizer steps)")
 
     model.train()
     chunk_loss        = 0.0
@@ -816,6 +711,9 @@ def train_one_chunk(
     pbar = tqdm(train_loader, desc=label, leave=True)
 
     for batch_idx, (x, y) in enumerate(pbar):
+        # Skip les batches déjà traités lors d'une reprise
+        if batch_idx < batches_done:
+            continue
         try:
             x, y = x.to(device), y.to(device)
 
@@ -860,7 +758,6 @@ def train_one_chunk(
                         'train_loss':         avg,
                         'lr':                 scheduler.get_last_lr()[0],
                     })
-                    save_graphs(training_history)
 
                 if global_step % CONFIG['save_every_steps'] == 0:
                     checkpoint_manager.save(model, optimizers, scheduler, metadata={
@@ -876,15 +773,6 @@ def train_one_chunk(
             running_loss    += raw
             valid_batches   += 1
             running_batches += 1
-
-            # ── Loss curve logging (1 point par optimizer step) ──
-            # On log uniquement quand un optimizer step vient d'avoir lieu
-            # accumulated_steps == 0 signifie qu'on vient de faire step()
-            if accumulated_steps == 0 and global_step > 0:
-                training_history.setdefault('loss_curve', []).append({
-                    'step':       global_step,
-                    'train_loss': raw,
-                })
 
             if batch_idx % 20 == 0:
                 avg = running_loss / max(running_batches, 1)
@@ -984,7 +872,7 @@ def main():
     muon_opt, adamw_opt = optimizers
 
     scheduler = WSDScheduler(
-        list(optimizers),
+        optimizers,
         max_lr        = CONFIG['learning_rate'],
         total_steps   = TOTAL_STEPS,
         warmup_ratio  = CONFIG['warmup_ratio'],
@@ -1061,6 +949,9 @@ def main():
         for cwi in range(start_cwi, CONFIG['chunks_per_epoch']):
             chunk_info = ep_chunks[cwi]
 
+            # Step au début de ce chunk — pour skip les batches déjà faits en reprise
+            chunk_start_step = global_step
+
             try:
                 global_step, total_training_time = train_one_chunk(
                     model               = model,
@@ -1073,6 +964,7 @@ def main():
                     total_training_time = total_training_time,
                     current_epoch       = epoch,
                     chunk_within_epoch  = cwi,
+                    resume_step         = chunk_start_step,
                 )
 
             except KeyboardInterrupt:
@@ -1152,7 +1044,6 @@ def main():
     with open(history_path, 'w') as f:
         json.dump(training_history, f, indent=2, default=str)
     print(f'  History : {history_path}')
-    save_graphs(training_history)
     print('DONE')
 
 
