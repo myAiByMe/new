@@ -181,17 +181,8 @@ print(f"  vocab={len(tokenizer)}")
 # ============================================================
 # LIVE PLOTTER
 # ============================================================
+
 class LivePlotter:
-    """
-    Deux graphiques PNG mis a jour en temps reel pendant le training :
-      - loss_curve.png : batch global vs cross-entropy loss (moyenne glissante)
-      - ppl_curve.png  : batch global vs perplexite (moyenne glissante)
-
-    Points de validation (rouge) superposes sur les deux courbes.
-    Sauvegarde atomique via .tmp pour eviter les PNG corrompus lors
-    d'un CTRL+C pendant l'ecriture.
-    """
-
     def __init__(self, plots_dir: str, smoothing: int = 50):
         self.plots_dir   = plots_dir
         self.smoothing   = smoothing
@@ -259,7 +250,7 @@ class LivePlotter:
                 ticker.FuncFormatter(lambda v, _: f'{int(v):,}'))
             return fig, ax
 
-        # ── Graphique 1 : LOSS ──────────────────────────────
+        # ── Graphique 1 : LOSS
         fig, ax = _make_ax()
         ax.plot(x, smoothed, color=C_TRAIN, linewidth=1.5,
                 label=f'Train loss (moy {self.smoothing}b)')
@@ -271,12 +262,12 @@ class LivePlotter:
         ax.set_title('HessGPT — Training Loss')
         ax.legend(facecolor=C_BG, edgecolor=C_GRID, labelcolor=C_TEXT, fontsize=9)
         fig.tight_layout()
-        tmp = self.loss_path + '.tmp'
+        tmp = self.loss_path.replace('.png', '_tmp.png')
         fig.savefig(tmp, dpi=130, bbox_inches='tight')
         os.replace(tmp, self.loss_path)
         plt.close(fig)
 
-        # ── Graphique 2 : PPL ───────────────────────────────
+        # ── Graphique 2 : PPL
         fig, ax = _make_ax()
         ax.plot(x, ppls, color=C_PPL, linewidth=1.5,
                 label=f'Train PPL (moy {self.smoothing}b)')
@@ -291,14 +282,13 @@ class LivePlotter:
             ax.set_yscale('log')
             ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
         fig.tight_layout()
-        tmp = self.ppl_path + '.tmp'
+        tmp = self.ppl_path.replace('.png', '_tmp.png')
         fig.savefig(tmp, dpi=130, bbox_inches='tight')
         os.replace(tmp, self.ppl_path)
         plt.close(fig)
 
     def save(self):
         self._render()
-
 
 _plotter = None
 
