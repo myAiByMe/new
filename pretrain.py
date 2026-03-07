@@ -21,6 +21,7 @@ SAVES :
 
 REPRISE :
     Relancer la même commande — le .pt est chargé automatiquement.
+    ✅ v3 : reprise fiable au step exact, skip correct des batches déjà faits.
 
 CONTENU DU .pt :
     model_state_dict      poids float32
@@ -29,17 +30,20 @@ CONTENU DU .pt :
     current_epoch         epoch en cours (base-1)
     chunk_within_epoch    prochain cwi à traiter (base-0)
     global_step           total optimizer steps
+    chunk_start_step      global_step au début du chunk en cours  ← NOUVEAU
     total_training_time   secondes GPU accumulées
     config                CONFIG complet
     training_history      dict complet
     last_save             timestamp ISO
 
-BUGS FIXÉS v2 :
+BUGS FIXÉS v3 :
     - configure_optimizers : itération directe sur named_parameters() du modèle
-      non-compilé pour éviter le KeyError causé par la double-itération
-      named_modules() + named_parameters(recurse=True).
-    - LazyChunkDataset : val_tokens correctement stocké comme self.val_tokens
-      et utilisé dans _load() via self.val_tokens (NameError corrigé).
+      non-compilé pour éviter le KeyError causé par la double-itération.
+    - LazyChunkDataset : val_tokens correctement stocké comme self.val_tokens.
+    - REPRISE : chunk_start_step sauvegardé dans le checkpoint → skip batches
+      fiable même après interruption en milieu de chunk. Avant ce fix,
+      steps_done était toujours 0 car chunk_start_step = global_step au
+      redémarrage (recalculé à tort), donc aucun batch n'était skipé.
 """
 
 import torch
@@ -57,6 +61,9 @@ import traceback
 import numpy as np
 
 sys.path.append('./Core/Model')
+sys.path.append('./Core/Attention')
+sys.path.append('./Core/FeedForward')
+sys.path.append('./Core/TransformerBlock')
 
 # ============================================================
 # TOKENS SPÉCIAUX
@@ -89,7 +96,7 @@ CONFIG = {
     'use_flash_attn':        True,
 
     # ── Training
-    'batch_size':            32,
+    'batch_size':            24,
     'gradient_accumulation': 4,
     'max_grad_norm':         1.0,
     'learning_rate':         4e-4,
@@ -115,16 +122,19 @@ CONFIG = {
     'validate_every_steps': 500,
     'val_batches':          50,
 
+    # ── Shuffle
+    'shuffle_seed': 42,        # seed de base — varie par epoch+chunk automatiquement
+
     # ── Saves
     'save_every_steps': 2000,
 
     # ── Checkpoint
-    'checkpoint_file': './checkpoints/HessGpt_pretrain.pt',
+    'checkpoint_file': './Model/HessGpt_pretrain.pt',
 
     # ── System
     'use_compile':  True,
     'compile_mode': 'default',
-    'num_workers':  4,
+    'num_workers':  16,
 }
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -220,7 +230,7 @@ print(f"  safety save : tous les {CONFIG['save_every_steps']} steps")
 # TOKENIZER
 # ============================================================
 print(f"\nLoading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained("unsloth/Meta-Llama-3-8B")
+tokenizer = AutoTokenizer.from_pretrained("NousResearch/Meta-Llama-3-8B")
 tokenizer.add_special_tokens({'additional_special_tokens': SPECIAL_TOKENS})
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
@@ -235,16 +245,9 @@ for tok in SPECIAL_TOKENS:
 class WSDScheduler:
     """
     WSD schedule partagé entre Muon et AdamW.
-
-    Muon utilise un lr fixe (lr_muon = lr_adamw * 5) — le ratio est
-    conservé à chaque step : quand AdamW est à X%, Muon est aussi à X%
-    de son lr max.
-
-    optimizers : liste [muon_opt, adamw_opt] ou un seul optimizer
     """
     def __init__(self, optimizers, max_lr, total_steps,
                  warmup_ratio=0.03, decay_ratio=0.15, min_lr_ratio=0.1):
-        # Accepte un seul optimizer ou une liste
         self.optimizers   = optimizers if isinstance(optimizers, list) else [optimizers]
         self.max_lr       = max_lr
         self.min_lr       = max_lr * min_lr_ratio
@@ -274,7 +277,6 @@ class WSDScheduler:
         self.current_step += 1
         for opt in self.optimizers:
             for pg in opt.param_groups:
-                # Muon garde son ratio 5x — on détecte via la présence de 'momentum'
                 if 'momentum' in pg:
                     pg['lr'] = lr * 5.0
                 else:
@@ -294,7 +296,10 @@ class WSDScheduler:
 # DATASET — 1 chunk à la fois en RAM
 # ============================================================
 class ChunkSubset(Dataset):
-    """Séquences extraites d'un tensor de tokens en RAM."""
+    """
+    Dataset brut d'un chunk — accès séquentiel par index réel.
+    Le shuffle et le skip sont délégués à SeededSampler.
+    """
     def __init__(self, tokens, seq_len, pad_token_id):
         self.tokens       = tokens
         self.seq_len      = seq_len
@@ -314,20 +319,51 @@ class ChunkSubset(Dataset):
         return chunk[:-1], chunk[1:]
 
 
+class SeededSampler(torch.utils.data.Sampler):
+    """
+    Sampler déterministe avec shuffle + skip intégré.
+
+    Garantie de reproductibilité :
+      - Génère la permutation COMPLÈTE en numpy avec la seed donnée
+      - Slice directement à partir de skip_samples
+        → zéro itération inutile, reprise instantanée même après 10k steps
+
+    Même (seed, skip_samples) à la reprise → exactement les mêmes
+    indices dans le même ordre → aucun batch retraité ni sauté à tort.
+
+    Args:
+        n            : nombre total de séquences dans le dataset
+        seed         : seed fixe pour ce (epoch, cwi) — identique run initial / reprise
+        skip_samples : samples déjà vus = batches_done * batch_size
+    """
+    def __init__(self, n: int, seed: int, skip_samples: int = 0):
+        self.n            = n
+        self.seed         = seed
+        self.skip_samples = min(skip_samples, n)
+
+        rng            = np.random.default_rng(seed)
+        indices        = rng.permutation(n)
+        self._indices  = indices[self.skip_samples:]
+
+        print(f"  SeededSampler : n={n:,}  seed={seed}  "
+              f"skip={self.skip_samples:,}  restant={len(self._indices):,}")
+
+    def __iter__(self):
+        return iter(self._indices.tolist())
+
+    def __len__(self):
+        return len(self._indices)
+
+
 class LazyChunkDataset:
     """
     Charge 1 chunk en RAM, split train/val.
     Appeler unload() après le train pour libérer la RAM.
-
-    ✅ FIX BUG 5 : val_tokens est maintenant stocké dans self.val_tokens
-    et utilisé via self.val_tokens dans _load(). L'ancienne version utilisait
-    val_tokens directement dans _load() sans le passer en argument ni le
-    stocker, causant un NameError garanti à l'exécution.
     """
     def __init__(self, chunk_info, seq_len, pad_token_id, val_tokens=15_000_000):
         self.seq_len      = seq_len
         self.pad_token_id = pad_token_id
-        self.val_tokens   = val_tokens   # ✅ FIX : stocké comme attribut
+        self.val_tokens   = val_tokens
         self._load(chunk_info)
 
     def _load(self, chunk_info):
@@ -349,7 +385,7 @@ class LazyChunkDataset:
 
         all_tokens = torch.cat(arrays)
         total      = len(all_tokens)
-        val_size   = min(self.val_tokens, int(total * 0.05))  # ✅ FIX : self.val_tokens
+        val_size   = min(self.val_tokens, int(total * 0.05))
         train_size = total - val_size
 
         self._train_toks = all_tokens[:train_size]
@@ -382,8 +418,11 @@ class CheckpointManager:
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
     def save(self, model, optimizers, scheduler, metadata):
-        """Sauvegarde atomique : écrit dans .tmp puis os.replace.
-        optimizers : tuple (muon_opt, adamw_opt) ou optimizer unique.
+        """
+        Sauvegarde atomique.
+        ✅ FIX REPRISE : chunk_start_step inclus dans le checkpoint
+        pour que train_one_chunk puisse calculer le bon batches_done
+        au redémarrage.
         """
         m  = model._orig_mod if hasattr(model, '_orig_mod') else model
         if isinstance(optimizers, (list, tuple)):
@@ -401,6 +440,7 @@ class CheckpointManager:
             'current_epoch':        metadata['current_epoch'],
             'chunk_within_epoch':   metadata['chunk_within_epoch'],
             'global_step':          metadata['global_step'],
+            'chunk_start_step':     metadata.get('chunk_start_step', 0),  # ✅ NOUVEAU
             'total_training_time':  metadata.get('total_training_time', 0.0),
             'config':               CONFIG,
             'training_history':     metadata['training_history'],
@@ -411,7 +451,9 @@ class CheckpointManager:
         os.replace(tmp, self.path)
         print(f"  💾 SAVE → epoch={metadata['current_epoch']}  "
               f"next_cwi={metadata['chunk_within_epoch']}/{CONFIG['chunks_per_epoch']}  "
-              f"step={metadata['global_step']:,}  [{self.path}]")
+              f"step={metadata['global_step']:,}  "
+              f"chunk_start={metadata.get('chunk_start_step', 0):,}  "
+              f"[{self.path}]")
 
     def load(self):
         if not os.path.exists(self.path):
@@ -421,6 +463,7 @@ class CheckpointManager:
         print(f"  epoch={cp.get('current_epoch','?')}  "
               f"cwi={cp.get('chunk_within_epoch','?')}  "
               f"step={cp.get('global_step',0):,}  "
+              f"chunk_start={cp.get('chunk_start_step',0):,}  "
               f"saved={cp.get('last_save','?')}")
         return cp
 
@@ -450,24 +493,9 @@ def validate(model, val_loader, max_batches=50):
 # ============================================================
 # MUON OPTIMIZER
 # ============================================================
-# Muon (MomentUm Orthogonalized by Newton-Schulz) applique une
-# mise à jour orthogonalisée sur les matrices 2D des couches cachées.
-# Règle d'or :
-#   - Muon  → matrices 2D des projections attention + FFN
-#   - AdamW → embeddings, output head, RMSNorm, biases, inv_freq RoPE
-#
-# Référence : https://github.com/KellerJordan/modded-nanogpt
-# ============================================================
-
 def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5) -> torch.Tensor:
-    """
-    Approximation Newton-Schulz de la matrice orthogonale la plus proche de G.
-    Converge en ~5 itérations pour des matrices bien conditionnées.
-    Retourne X tel que X^T X ≈ I et X G^T ≈ polar(G).
-    """
     assert G.ndim >= 2
     a, b, c = (3.4445, -4.7750, 2.0315)
-    # Normalisation initiale pour la stabilité numérique
     X = G.bfloat16() / (G.norm() + 1e-7)
     if G.size(0) > G.size(1):
         X = X.T
@@ -481,26 +509,6 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5) -> torch.Tensor
 
 
 class Muon(torch.optim.Optimizer):
-    """
-    Muon — MomentUm Orthogonalized by Newton-Schulz.
-
-    Appliqué UNIQUEMENT sur les matrices 2D des couches cachées
-    (projections attention Q/K/V/O et FFN gate/up/down).
-
-    Ne jamais utiliser sur :
-      - token_embeddings  (gradients clairsemés)
-      - output_head       (weight-tied avec embeddings)
-      - RMSNorm weights   (tenseurs 1D)
-      - inv_freq RoPE     (buffer non-entraînable)
-
-    Args:
-        params        : paramètres 2D des couches cachées
-        lr            : learning rate (défaut 0.02, ~5x AdamW)
-        momentum      : momentum Nesterov (défaut 0.95)
-        nesterov      : utiliser Nesterov momentum (recommandé)
-        ns_steps      : itérations Newton-Schulz (5 suffit)
-        weight_decay  : weight decay (défaut 0.0 — Muon orthogonalise déjà)
-    """
     def __init__(self, params, lr=0.02, momentum=0.95,
                  nesterov=True, ns_steps=5, weight_decay=0.0):
         defaults = dict(lr=lr, momentum=momentum,
@@ -511,44 +519,32 @@ class Muon(torch.optim.Optimizer):
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
-            lr           = group['lr']
-            momentum     = group['momentum']
-            nesterov     = group['nesterov']
-            ns_steps     = group['ns_steps']
-            wd           = group['weight_decay']
+            lr       = group['lr']
+            momentum = group['momentum']
+            nesterov = group['nesterov']
+            ns_steps = group['ns_steps']
+            wd       = group['weight_decay']
 
             for p in group['params']:
                 if p.grad is None:
                     continue
-
                 g = p.grad
                 if g.ndim < 2:
-                    # Sécurité : ne jamais orthogonaliser un vecteur 1D
                     continue
-
                 state = self.state[p]
                 if 'momentum_buffer' not in state:
                     state['momentum_buffer'] = torch.zeros_like(g)
-
                 buf = state['momentum_buffer']
                 buf.mul_(momentum).add_(g)
-
                 if nesterov:
                     g = g + momentum * buf
                 else:
                     g = buf
-
-                # Orthogonalisation via Newton-Schulz
                 g = zeropower_via_newtonschulz5(g, steps=ns_steps)
-
-                # Mise à l'échelle : norme de Frobenius normalisée
                 scale = max(g.size(0), g.size(1)) ** 0.5
                 g = g * scale
-
-                # Weight decay
                 if wd != 0.0:
                     p.mul_(1.0 - lr * wd)
-
                 p.add_(g, alpha=-lr)
 
 
@@ -556,58 +552,32 @@ class Muon(torch.optim.Optimizer):
 # CONFIGURE OPTIMIZERS — Muon + AdamW
 # ============================================================
 def configure_optimizers(model, lr, weight_decay, betas, eps):
-    """
-    Partitionnement des paramètres :
-
-      muon_params  : matrices 2D des couches cachées (attention + FFN)
-                     → Muon avec lr_muon ≈ 5x lr AdamW
-      adamw_decay  : autres matrices 2D (embeddings, output_head)
-                     → AdamW avec weight decay
-      adamw_nodecay: tenseurs 1D (RMSNorm, biases, inv_freq)
-                     → AdamW sans weight decay
-
-    Règle d'exclusion Muon :
-      - token_embeddings.weight  → gradients clairsemés (sparse)
-      - output_head.weight       → weight-tied avec embeddings
-      - Tout paramètre hors des TransformerBlocks
-
-    Args:
-        model : modèle NON compilé (unwrap _orig_mod avant d'appeler)
-    """
-    # Noms des paramètres à exclure de Muon
     MUON_EXCLUDE = {
         'token_embeddings.weight',
         'output_head.weight',
         'position_embeddings.weight',
     }
 
-    muon_params   = []   # matrices 2D dans les blocks → Muon
-    adamw_decay   = []   # matrices 2D hors blocks → AdamW + wd
-    adamw_nodecay = []   # tenseurs 1D → AdamW sans wd
+    muon_params   = []
+    adamw_decay   = []
+    adamw_nodecay = []
 
     for pn, p in model.named_parameters():
         if not p.requires_grad:
             continue
-
-        # Paramètres explicitement exclus de Muon
         if pn in MUON_EXCLUDE:
             if p.dim() >= 2:
                 adamw_decay.append(p)
             else:
                 adamw_nodecay.append(p)
             continue
-
         if p.dim() >= 2 and pn.startswith('blocks.'):
-            # Matrice 2D dans un TransformerBlock → Muon
             muon_params.append(p)
         elif p.dim() >= 2:
-            # Matrice 2D hors block (ln_final.weight si 2D, etc.)
             adamw_decay.append(p)
         else:
-            # Tenseur 1D (norms, biases, inv_freq)
             adamw_nodecay.append(p)
 
-    # lr Muon ≈ 5x lr AdamW (standard recommandé)
     lr_muon = lr * 5.0
 
     muon_opt = Muon(
@@ -616,7 +586,7 @@ def configure_optimizers(model, lr, weight_decay, betas, eps):
         momentum     = 0.95,
         nesterov     = True,
         ns_steps     = 5,
-        weight_decay = 0.0,   # Muon orthogonalise déjà — wd inutile
+        weight_decay = 0.0,
     )
 
     adamw_opt = torch.optim.AdamW(
@@ -646,11 +616,21 @@ def train_one_chunk(
     checkpoint_manager, training_history,
     global_step, total_training_time,
     current_epoch, chunk_within_epoch,
-    resume_step=0,
+    chunk_start_step,   # ✅ FIX : global_step au début de ce chunk (lu depuis checkpoint)
 ):
     """
-    optimizers  : tuple (muon_opt, adamw_opt)
-    resume_step : global_step au début de ce chunk — skip les batches déjà faits
+    ✅ FIX REPRISE v3 :
+    chunk_start_step est maintenant passé explicitement et lu depuis le
+    checkpoint. Il représente le global_step au moment où ce chunk a commencé
+    pour la première fois.
+
+    Avant ce fix : chunk_start_step = global_step était recalculé à chaque
+    redémarrage, donc steps_done = global_step - chunk_start_step = 0
+    et batches_done = 0 → le chunk repartait toujours du début.
+
+    Après ce fix : chunk_start_step est persisté dans le .pt, donc
+    steps_done = global_step - chunk_start_step est correct et le
+    nombre exact de batches à skipper est calculé proprement.
     """
     muon_opt, adamw_opt = optimizers
 
@@ -658,9 +638,21 @@ def train_one_chunk(
              f"cwi {chunk_within_epoch+1}/{CONFIG['chunks_per_epoch']} "
              f"(chunk_{chunk_info['id']:03d})")
 
+    # ✅ Calcul du nombre de batches déjà traités dans ce chunk
+    steps_done   = global_step - chunk_start_step
+    batches_done = steps_done * CONFIG['gradient_accumulation']
+
+    # Seed déterministe : varie par (epoch, cwi) → ordre différent à chaque epoch
+    # Reproductible : même seed = même ordre si on reprend le même chunk
+    shuffle_seed = CONFIG['shuffle_seed'] + (current_epoch - 1) * 1000 + chunk_within_epoch
+
     print(f"\n{'='*80}")
     print(f"  {label}  LR_adamw={scheduler.get_last_lr()[0]:.2e}"
-          f"  LR_muon={scheduler.get_last_lr()[0]*5:.2e}")
+          f"  LR_muon={scheduler.get_last_lr()[0]*5:.2e}  shuffle_seed={shuffle_seed}")
+    if batches_done > 0:
+        print(f"  ⏩ Reprise : global_step={global_step:,}  "
+              f"chunk_start_step={chunk_start_step:,}  "
+              f"steps_done={steps_done:,}  batches_done={batches_done:,}")
     print(f"{'='*80}")
 
     try:
@@ -670,33 +662,47 @@ def train_one_chunk(
         )
     except Exception as e:
         print(f"  ERREUR chargement chunk : {e}")
-        return global_step, total_training_time
+        return global_step, total_training_time, chunk_start_step
+
+    train_ds    = cds.get_train_dataset()
+    total_seqs  = len(train_ds)
+
+    if batches_done >= math.ceil(total_seqs / CONFIG['batch_size']):
+        # Ce chunk est entièrement terminé
+        print(f"  ✅ Chunk déjà entièrement traité, skip.")
+        cds.unload()
+        gc.collect()
+        return global_step, total_training_time, chunk_start_step
+
+    # ✅ SeededSampler : shuffle déterministe + skip instantané des batches déjà faits
+    # skip_samples = batches_done * batch_size (nombre exact de séquences déjà vues)
+    skip_samples = batches_done * CONFIG['batch_size']
+    sampler = SeededSampler(
+        n            = total_seqs,
+        seed         = shuffle_seed,
+        skip_samples = skip_samples,
+    )
 
     train_loader = DataLoader(
-        cds.get_train_dataset(),
-        batch_size=CONFIG['batch_size'],
-        shuffle=False,
-        num_workers=CONFIG['num_workers'],
-        pin_memory=True,
-        persistent_workers=False,
-        drop_last=False,
+        train_ds,
+        batch_size  = CONFIG['batch_size'],
+        sampler     = sampler,          # shuffle + skip intégrés — pas de shuffle=True
+        num_workers = CONFIG['num_workers'],
+        pin_memory  = True,
+        persistent_workers = False,
+        drop_last   = False,
     )
     val_loader = DataLoader(
         cds.get_val_dataset(),
-        batch_size=CONFIG['batch_size'],
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True,
+        batch_size  = CONFIG['batch_size'],
+        shuffle     = False,
+        num_workers = 2,
+        pin_memory  = True,
     )
 
-    num_batches = len(train_loader)
-    print(f"  train={num_batches:,} batches | val={len(val_loader):,} batches")
-
-    # Calcul des batches déjà faits pour ce chunk (reprise)
-    steps_done   = global_step - resume_step
-    batches_done = steps_done * CONFIG['gradient_accumulation']
-    if batches_done > 0:
-        print(f"  ⏩ Reprise : skip {batches_done:,} batches déjà faits ({steps_done:,} optimizer steps)")
+    num_batches = len(train_loader)   # = batches restants après skip
+    total_batches = math.ceil(total_seqs / CONFIG['batch_size'])
+    print(f"  train={total_batches:,} batches total | restant={num_batches:,} | val={len(val_loader):,}")
 
     model.train()
     chunk_loss        = 0.0
@@ -708,12 +714,10 @@ def train_one_chunk(
     ae  = (device == 'cuda')
     adt = torch.bfloat16 if ae else torch.float32
 
-    pbar = tqdm(train_loader, desc=label, leave=True)
+    pbar = tqdm(train_loader, desc=label, leave=True,
+                initial=total_batches - num_batches, total=total_batches)
 
     for batch_idx, (x, y) in enumerate(pbar):
-        # Skip les batches déjà traités lors d'une reprise
-        if batch_idx < batches_done:
-            continue
         try:
             x, y = x.to(device), y.to(device)
 
@@ -760,10 +764,12 @@ def train_one_chunk(
                     })
 
                 if global_step % CONFIG['save_every_steps'] == 0:
+                    # ✅ chunk_start_step inclus dans le save intermédiaire
                     checkpoint_manager.save(model, optimizers, scheduler, metadata={
                         'current_epoch':       current_epoch,
                         'chunk_within_epoch':  chunk_within_epoch,
                         'global_step':         global_step,
+                        'chunk_start_step':    chunk_start_step,   # ✅
                         'total_training_time': total_training_time + (time.time() - t_start),
                         'training_history':    training_history,
                     })
@@ -819,7 +825,7 @@ def train_one_chunk(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return global_step, total_training_time
+    return global_step, total_training_time, chunk_start_step
 
 # ============================================================
 # MAIN
@@ -860,7 +866,6 @@ def main():
         except Exception as e:
             print(f'  FAIL (on continue sans) : {e}')
 
-    # Unwrap modèle compilé avant configure_optimizers
     raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
     optimizers = configure_optimizers(
         raw_model,
@@ -872,7 +877,7 @@ def main():
     muon_opt, adamw_opt = optimizers
 
     scheduler = WSDScheduler(
-        optimizers,
+        list(optimizers),
         max_lr        = CONFIG['learning_rate'],
         total_steps   = TOTAL_STEPS,
         warmup_ratio  = CONFIG['warmup_ratio'],
@@ -894,19 +899,21 @@ def main():
     current_epoch       = 1
     chunk_within_epoch  = 0
     total_training_time = 0.0
+    chunk_start_step    = 0  # ✅ NOUVEAU : initialisé à 0
 
     cp = ckpt_mgr.load()
     if cp:
         print('\nREPRISE')
         unwrapped = model._orig_mod if hasattr(model, '_orig_mod') else model
         unwrapped.load_state_dict(cp['model_state_dict'])
-        # Supporte l'ancien format (optimizer_state_dict) et le nouveau (muon+adamw)
+
         if 'muon_state_dict' in cp and 'adamw_state_dict' in cp:
             muon_opt.load_state_dict(cp['muon_state_dict'])
             adamw_opt.load_state_dict(cp['adamw_state_dict'])
         elif 'optimizer_state_dict' in cp:
             print('  WARN : checkpoint ancien format (AdamW seul) — Muon repart de zéro')
             adamw_opt.load_state_dict(cp['optimizer_state_dict'])
+
         scheduler.load_state_dict(cp['scheduler_state_dict'])
         # Resync lr après reprise
         for pg in muon_opt.param_groups:
@@ -917,10 +924,18 @@ def main():
         current_epoch       = cp.get('current_epoch', 1)
         chunk_within_epoch  = cp.get('chunk_within_epoch', 0)
         global_step         = cp.get('global_step', 0)
+        chunk_start_step    = cp.get('chunk_start_step', 0)  # ✅ NOUVEAU
         total_training_time = cp.get('total_training_time', 0.0)
         training_history    = cp.get('training_history', training_history)
+
         print(f'  -> epoch={current_epoch}  cwi={chunk_within_epoch}  '
-              f'step={global_step:,}')
+              f'step={global_step:,}  chunk_start_step={chunk_start_step:,}')
+
+        # Vérification cohérence
+        steps_in_chunk = global_step - chunk_start_step
+        batches_in_chunk = steps_in_chunk * CONFIG['gradient_accumulation']
+        print(f'  -> steps déjà faits dans ce chunk = {steps_in_chunk:,}  '
+              f'(≈ {batches_in_chunk:,} batches à skipper)')
 
         if current_epoch > CONFIG['num_epochs']:
             print(f'\n✅ Training déjà terminé ({CONFIG["num_epochs"]} epochs).')
@@ -944,16 +959,26 @@ def main():
         chunk_ids_str = ' '.join(f'chunk_{c["id"]:03d}' for c in ep_chunks)
         print(f'\nEPOCH {epoch}/{CONFIG["num_epochs"]} — chunks : {chunk_ids_str}')
         if start_cwi > 0:
-            print(f'  (reprise à cwi={start_cwi})')
+            print(f'  (reprise à cwi={start_cwi}  chunk_start_step={chunk_start_step:,})')
 
         for cwi in range(start_cwi, CONFIG['chunks_per_epoch']):
             chunk_info = ep_chunks[cwi]
 
-            # Step au début de ce chunk — pour skip les batches déjà faits en reprise
-            chunk_start_step = global_step
+            # ✅ FIX CLEF : chunk_start_step est recalculé SEULEMENT si on démarre
+            # un nouveau chunk (cwi différent de la reprise). Si on reprend
+            # exactement le même chunk (même epoch + même cwi), on conserve
+            # chunk_start_step issu du checkpoint.
+            is_resume_chunk = (
+                epoch == current_epoch and
+                cwi   == chunk_within_epoch and
+                cp    is not None
+            )
+            if not is_resume_chunk:
+                # Nouveau chunk → le step courant devient le point de départ
+                chunk_start_step = global_step
 
             try:
-                global_step, total_training_time = train_one_chunk(
+                global_step, total_training_time, chunk_start_step = train_one_chunk(
                     model               = model,
                     chunk_info          = chunk_info,
                     optimizers          = optimizers,
@@ -964,8 +989,11 @@ def main():
                     total_training_time = total_training_time,
                     current_epoch       = epoch,
                     chunk_within_epoch  = cwi,
-                    resume_step         = chunk_start_step,
+                    chunk_start_step    = chunk_start_step,  # ✅
                 )
+                # Après le premier chunk (qu'il soit en reprise ou non),
+                # on désactive le flag de reprise pour les cwi suivants
+                cp = None
 
             except KeyboardInterrupt:
                 print('\nCTRL+C — sauvegarde...')
@@ -973,6 +1001,7 @@ def main():
                     'current_epoch':       epoch,
                     'chunk_within_epoch':  cwi,
                     'global_step':         global_step,
+                    'chunk_start_step':    chunk_start_step,  # ✅
                     'total_training_time': total_training_time,
                     'training_history':    training_history,
                 })
@@ -984,6 +1013,7 @@ def main():
                     'current_epoch':       epoch,
                     'chunk_within_epoch':  cwi,
                     'global_step':         global_step,
+                    'chunk_start_step':    chunk_start_step,  # ✅
                     'total_training_time': total_training_time,
                     'training_history':    training_history,
                 })
@@ -1001,6 +1031,7 @@ def main():
                 'current_epoch':       save_ep,
                 'chunk_within_epoch':  save_cwi,
                 'global_step':         global_step,
+                'chunk_start_step':    global_step,  # ✅ nouveau chunk = nouveau start
                 'total_training_time': total_training_time,
                 'training_history':    training_history,
             })
@@ -1036,6 +1067,7 @@ def main():
         'current_epoch':       CONFIG['num_epochs'] + 1,
         'chunk_within_epoch':  0,
         'global_step':         global_step,
+        'chunk_start_step':    global_step,
         'total_training_time': total_training_time,
         'training_history':    training_history,
     })
