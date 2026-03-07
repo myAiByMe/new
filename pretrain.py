@@ -230,7 +230,7 @@ print(f"  safety save : tous les {CONFIG['save_every_steps']} steps")
 # TOKENIZER
 # ============================================================
 print(f"\nLoading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained("unsloth/Meta-Llama-3-8B")
+tokenizer = AutoTokenizer.from_pretrained("NousResearch/Meta-Llama-3-8B")
 tokenizer.add_special_tokens({'additional_special_tokens': SPECIAL_TOKENS})
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
